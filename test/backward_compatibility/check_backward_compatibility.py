@@ -73,6 +73,8 @@ ALLOW_LIST = [
     ("prepacked::unpack_prepacked_sizes_conv2d", datetime.date(9999, 1, 1)),
     ("prepacked::unpack_prepacked_sizes_linear", datetime.date(9999, 1, 1)),
     ("aten::kl_div_backward", datetime.date(2021, 12, 31)),
+    ("aten::l1_loss_backward.grad_input", datetime.date(2021, 12, 31)),
+    ("aten::smooth_l1_loss_backward.grad_input", datetime.date(2021, 12, 31)),
 ]
 
 ALLOW_LIST_COMPILED = [

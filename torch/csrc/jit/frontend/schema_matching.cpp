@@ -1,9 +1,14 @@
 #include <torch/csrc/jit/frontend/schema_matching.h>
 
 #include <ATen/core/jit_type.h>
+#include <c10/util/Exception.h>
+#include <c10/util/Optional.h>
 #include <c10/util/irange.h>
 #include <torch/csrc/jit/frontend/builtin_functions.h>
 #include <torch/csrc/jit/frontend/error_report.h>
+#include <torch/csrc/jit/frontend/function_schema_parser.h>
+#include <torch/csrc/jit/operator_upgraders/utils.h>
+#include <torch/csrc/jit/operator_upgraders/version_map.h>
 #include <torch/csrc/jit/runtime/operator.h>
 
 namespace torch {
@@ -410,6 +415,7 @@ static c10::optional<MatchedSchema> tryMatchSchema(
     }
     positional_inputs.push_back(positional);
   }
+
   // check for unused self argument
   if (self != c10::nullopt && failure_messages) {
     err() << "Provided self argument not used in schema.\n";
@@ -462,10 +468,15 @@ static c10::optional<MatchedSchema> tryMatchSchema(
     return_field_names =
         fmap(returns, [&](const Argument& r) { return r.name(); });
   }
+
+  // construct the full name of the schema for easier look up
+  auto schema_name = schema.operator_name().name + "." + schema.overload_name();
+
   return MatchedSchema{
       std::move(positional_inputs),
       std::move(return_types),
-      std::move(return_field_names)};
+      std::move(return_field_names),
+      schema_name};
 }
 
 MatchedSchema matchSchema(
@@ -516,7 +527,7 @@ static std::string prefixLine(
 }
 
 std::pair<size_t, MatchedSchema> matchSchemas(
-    const std::vector<const FunctionSchema*>& schemas,
+    const std::vector<::c10::FunctionSchema>& schemas,
     const SourceRange& loc,
     Graph& graph,
     at::ArrayRef<NamedValue> args,
@@ -528,7 +539,7 @@ std::pair<size_t, MatchedSchema> matchSchemas(
   // first. this is faster and puts less dead code in the graph.
   if (schemas.size() == 1) {
     return std::make_pair(
-        0, matchSchema(*schemas.at(0), loc, graph, args, kwargs, self));
+        0, matchSchema(schemas[0], loc, graph, args, kwargs, self));
   }
   std::stringstream failure_messages;
   for (bool allow_conversions : {false, true}) {
@@ -536,7 +547,7 @@ std::pair<size_t, MatchedSchema> matchSchemas(
     failure_messages.str("");
     for (const auto i : c10::irange(schemas.size())) {
       const auto matched_schema = tryMatchSchema(
-          *schemas[i],
+          schemas[i],
           loc,
           graph,
           args,
@@ -589,7 +600,8 @@ static Value* emitBuiltinNode(
     const MatchedSchema& matched_schema,
     const SourceRange& loc,
     Graph& graph,
-    Symbol name) {
+    Symbol name,
+    c10::optional<int64_t> version) {
   auto n = graph.insertNode(graph.create(name, matched_schema.inputs, 0))
                ->setSourceRange(loc);
 
@@ -598,8 +610,11 @@ static Value* emitBuiltinNode(
   }
 
   // assert that we did indeed create an op that has implementation
-  // otherwise schema and dispatch are not in sync
-  n->getOperation();
+  // otherwise schema and dispatch are not in sync ONLY if the op is up
+  // to date with the server version
+  if (!version.has_value() || isOpSymbolCurrent(matched_schema.schema_name, version.value())) {
+    n->getOperation();
+  }
 
   return packOutputs(graph, n->outputs(), matched_schema.return_field_names);
 }
@@ -612,19 +627,52 @@ Value* emitBuiltinCall(
     Symbol name,
     at::ArrayRef<NamedValue> args,
     at::ArrayRef<NamedValue> kwargs,
-    const c10::optional<NamedValue>& self) {
+    const c10::optional<NamedValue>& self,
+    const c10::optional<int64_t> version) {
   const auto& variants = getAllOperatorsFor(name);
   const auto& builtin_functions = getAllBuiltinFunctionsFor(name);
 
+  // first let's set the graph's version
+  if (version.has_value()) {
+    if (graph.get_op_version().has_value()) {
+      TORCH_INTERNAL_ASSERT(version.value() == graph.get_op_version().value());
+    } else {
+      graph.set_op_version(version.value());
+    }
+  }
+
   std::stringstream failure_messages;
-  std::vector<const FunctionSchema*> schemas;
+  std::vector<FunctionSchema> schemas;
   schemas.reserve(variants.size());
   for (const std::shared_ptr<Operator>& op : variants) {
-    schemas.push_back(&op->schema());
+    auto op_name =
+        op->schema().operator_name().name + "." + op->schema().overload_name();
+    if (version.has_value()) {
+      auto version_entry = operator_version_map.find(op_name);
+      if (version_entry != operator_version_map.end()) {
+        auto old_schema_entry =
+            findUpgrader(version_entry->second, version.value());
+        if (!old_schema_entry.has_value()) {
+          if (isOpEntryCurrent(version_entry->second, version.value())) {
+            schemas.push_back(op->schema());
+          } else {
+            TORCH_INTERNAL_ASSERT(false, "Valid upgrader must be present");
+          }
+        } else {
+          auto old_schema = parseSchema(old_schema_entry.value().old_schema);
+          schemas.push_back(old_schema);
+        }
+      } else {
+        schemas.push_back(op->schema());
+      }
+    } else {
+      schemas.push_back(op->schema());
+    }
   }
+
   for (const auto method : builtin_functions) {
     method->ensure_defined();
-    schemas.push_back(&method->getSchema());
+    schemas.push_back(method->getSchema());
   }
 
   // no operators found with the same name, print out similarly named operators
@@ -650,7 +698,7 @@ Value* emitBuiltinCall(
   auto matched = matchSchemas(schemas, loc, graph, args, kwargs, self);
 
   if (matched.first < variants.size()) {
-    return emitBuiltinNode(matched.second, loc, graph, name);
+    return emitBuiltinNode(matched.second, loc, graph, name, version);
   } else {
     auto& fn = *builtin_functions[matched.first - variants.size()];
     // we inline builtin calls because they are normally very small

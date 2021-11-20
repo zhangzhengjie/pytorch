@@ -1,3 +1,4 @@
+#include <caffe2/serialize/versions.h>
 #include <torch/csrc/jit/serialization/python_print.h>
 
 #include <algorithm>
@@ -9,7 +10,6 @@
 #include <torch/csrc/jit/api/function_impl.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/csrc/jit/frontend/error_report.h>
-#include <torch/csrc/jit/frontend/versioned_symbols.h>
 #include <torch/csrc/jit/ir/attributes.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/ir/ir_views.h>
@@ -741,15 +741,9 @@ struct PythonPrintImpl {
     }
   }
 
-  void checkVersion(const Node* const node) {
-    min_version_ =
-        std::max(min_version_, get_min_version_for_kind(node->kind()));
-  }
-
   void printNode(Node* node, bool print_const) {
     WithSourceRange guard(&source_range_stack_, node);
     scanTypeDependencies(node);
-    checkVersion(node);
     if (!print_const && node->kind() == prim::Constant)
       return;
     switch (node->kind()) {
@@ -1594,7 +1588,7 @@ struct PythonPrintImpl {
   bool enforce_importable_;
 
   // The least version that supports all printed ops
-  uint64_t min_version_ = 0;
+  uint64_t min_version_ = caffe2::serialize::kProducedFileFormatVersion;
 };
 
 PythonPrint::PythonPrint(

@@ -13,6 +13,7 @@
 #include <torch/csrc/jit/runtime/graph_iterator.h>
 #include <torch/csrc/jit/runtime/instruction.h>
 #include <torch/csrc/jit/runtime/interpreter/preprocess_graph.h>
+#include <torch/csrc/jit/serialization/export.h>
 
 namespace torch {
 namespace jit {

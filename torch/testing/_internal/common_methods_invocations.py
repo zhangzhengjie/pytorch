@@ -4906,9 +4906,9 @@ def sample_inputs_lu(op_info, device, dtype, requires_grad=False, **kwargs):
 
     return list(generate_samples())
 
-def sample_inputs_linalg_lu_factor(op_info, device, dtype, requires_grad=False, **kwargs):
-    # When calling `lu_factor` we need to assure that the matrix is invertible
-    make_fn = make_tensor if "ex" in op_info.name else make_fullrank_matrices_with_distinct_singular_values
+def sample_inputs_linalg_lu(op_info, device, dtype, requires_grad=False, **kwargs):
+    full_rank = (op_info.name == "linalg.lu_factor")
+    make_fn = make_tensor if not full_rank else make_fullrank_matrices_with_distinct_singular_values
     make_arg = partial(make_fn, dtype=dtype, device=device, requires_grad=requires_grad)
 
     # not needed once OpInfo tests support Iterables
@@ -4920,7 +4920,7 @@ def sample_inputs_linalg_lu_factor(op_info, device, dtype, requires_grad=False, 
         for batch_shape, pivot, delta in product(batch_shapes, pivots, deltas):
             shape = batch_shape + (S + delta, S)
             # Insanely annoying that make_fullrank_blablabla accepts a *shape and not a tuple!
-            A = make_arg(shape) if "ex" in op_info.name else make_arg(*shape)
+            A = make_arg(shape) if not full_rank else make_arg(*shape)
             yield SampleInput(A, kwargs={"pivot": pivot})
 
     return list(generate_samples())
@@ -4963,7 +4963,7 @@ def sample_inputs_lu_solve(op_info, device, dtype, requires_grad=False, **kwargs
 def sample_inputs_lu_unpack(op_info, device, dtype, requires_grad=False, **kwargs):
 
     def generate_samples():
-        for lu_sample in sample_inputs_lu(op_info, device, dtype, requires_grad, **kwargs):
+        for lu_sample in sample_inputs_linalg_lu(op_info, device, dtype, requires_grad, **kwargs):
             lu_data, pivots = torch.linalg.lu_factor(lu_sample.input)
             lu_data.requires_grad_(requires_grad)
             yield SampleInput(lu_data, args=(pivots,))
@@ -9191,28 +9191,37 @@ op_db: List[OpInfo] = [
            aten_name='linalg_lu_factor',
            op=torch.linalg.lu_factor,
            dtypes=floating_and_complex_types(),
-           check_batched_gradgrad=False,
            supports_forward_ad=True,
-           sample_inputs_func=sample_inputs_linalg_lu_factor,
+           sample_inputs_func=sample_inputs_linalg_lu,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack]),
     OpInfo('linalg.lu_factor_ex',
            aten_name='linalg_lu_factor_ex',
            op=torch.linalg.lu_factor_ex,
            dtypes=floating_and_complex_types(),
-           check_batched_gradgrad=False,
            supports_forward_ad=True,
-           sample_inputs_func=sample_inputs_linalg_lu_factor,
+           sample_inputs_func=sample_inputs_linalg_lu,
            decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack]),
+    OpInfo('linalg.lu',
+           aten_name='linalg_lu',
+           op=torch.linalg.lu,
+           dtypes=floating_and_complex_types(),
+           supports_forward_ad=True,
+           sample_inputs_func=sample_inputs_linalg_lu,
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack]),
+    OpInfo('lu_unpack',
+           op=torch.lu_unpack,
+           dtypes=floating_and_complex_types(),
+           supports_forward_ad=True,
+           sample_inputs_func=sample_inputs_lu_unpack),
     OpInfo('lu',
            op=torch.lu,
            dtypes=floating_and_complex_types(),
-           check_batched_gradgrad=False,
            supports_forward_ad=True,
            # https://github.com/pytorch/pytorch/issues/66357
            check_batched_forward_grad=False,
            supports_out=False,
            sample_inputs_func=sample_inputs_lu,
-           decorators=[skipCUDAIfNoMagma, skipCPUIfNoLapack],
+           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCPUIfNoLapack],
            skips=(
                # we skip jit tests because `lu` is a torch function
                # RuntimeError:
@@ -9231,28 +9240,7 @@ op_db: List[OpInfo] = [
            # See https://github.com/pytorch/pytorch/issues/66357
            check_batched_forward_grad=False,
            sample_inputs_func=sample_inputs_lu_solve,
-           decorators=[skipCUDAIfNoMagma, skipCUDAIfRocm, skipCPUIfNoLapack],
-           skips=(
-               # RuntimeError: lu_unpack: LU_pivots is expected to be a contiguous tensor of torch.int32 dtype
-               DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_noncontiguous_samples'),  # noqa: B950
-           )),
-    OpInfo('lu_unpack',
-           op=torch.lu_unpack,
-           dtypes=floating_and_complex_types(),
-           supports_inplace_autograd=False,
-           # we use in-place operations which cannot be avoided.
-           # This causes vmap failures, hence we skip batched gradient checks
-           check_batched_grad=False,
-           supports_out=True,
-           sample_inputs_func=sample_inputs_lu_unpack,
-           decorators=[skipCUDAIfNoMagmaAndNoCusolver, skipCUDAIfRocm, skipCPUIfNoLapack],
-           skips=(
-               # LU_pivots is expected to be a contiguous tensor
-               DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_noncontiguous_samples'),  # noqa: B950
-               # cuda gradchecks are slow
-               # see discussion https://github.com/pytorch/pytorch/pull/47761#issuecomment-747316775
-               DecorateInfo(unittest.skip("Skipped!"), 'TestGradients', 'test_fn_gradgrad', device_type='cuda'),
-           )),
+           decorators=[skipCUDAIfNoMagma, skipCUDAIfRocm, skipCPUIfNoLapack]),
     OpInfo('masked_fill',
            dtypes=all_types_and_complex_and(torch.bool, torch.half, torch.bfloat16),
            sample_inputs_func=sample_inputs_masked_fill,

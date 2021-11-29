@@ -943,6 +943,32 @@ void lu_solve_kernel(const Tensor& b, const Tensor& lu, const Tensor& pivots) {
   lu_solve_trans_kernel(b, lu, pivots, TransposeType::NoTranspose);
 }
 
+void unpack_pivots_cpu_kernel(TensorIterator& iter, const int64_t dim_size) {
+  auto loop = [&](char* const* const  data, const int64_t* const strides, const int64_t nelems) {
+    auto* perm_ptr = data[0];
+    const auto* pivots_ptr = data[1];
+
+    for (const auto elem : c10::irange(nelems)) {
+      (void)elem; //Suppress unused variable warning
+      // WARNING: torch.lu returns int32 pivots,
+      // this behavior could change in the future.
+      const auto perm_data = reinterpret_cast<int64_t*>(perm_ptr);
+      const auto pivots_data = reinterpret_cast<const int32_t*>(pivots_ptr);
+
+      for (const auto i : c10::irange(dim_size)) {
+        std::swap(
+          perm_data[i],
+          perm_data[pivots_data[i] - 1]
+        );
+      }
+
+      perm_ptr += strides[0];
+      pivots_ptr += strides[1];
+    }
+  };
+
+  iter.for_each(loop);
+}
 } // anonymous namespace
 
 REGISTER_ARCH_DISPATCH(cholesky_stub, DEFAULT, &cholesky_kernel);
@@ -1010,4 +1036,8 @@ REGISTER_AVX512_DISPATCH(lu_solve_stub, &lu_solve_kernel);
 REGISTER_AVX2_DISPATCH(lu_solve_stub, &lu_solve_kernel);
 REGISTER_VSX_DISPATCH(lu_solve_stub, &lu_solve_kernel);
 
+REGISTER_ARCH_DISPATCH(unpack_pivots_stub, DEFAULT, &unpack_pivots_cpu_kernel);
+REGISTER_AVX512_DISPATCH(unpack_pivots_stub, &unpack_pivots_cpu_kernel);
+REGISTER_AVX2_DISPATCH(unpack_pivots_stub, &unpack_pivots_cpu_kernel);
+REGISTER_VSX_DISPATCH(unpack_pivots_stub, &unpack_pivots_cpu_kernel);
 }} // namespace at::native

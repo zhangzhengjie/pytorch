@@ -22,6 +22,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include "caffe2/serialize/versions.h"
 
 // The import process to serialize the bytecode package.
 // An example for bytecode.pkl of a small mobile_module looks like:
@@ -203,6 +204,7 @@ class BytecodeDeserializer final {
 
  private:
   TypePtr resolveTypeName(const c10::QualifiedName& qn);
+  void init_upgrader(mobile::Function* function);
   void parseMethods(
       c10::ivalue::TupleElements&& vals,
       c10::optional<c10::ivalue::TupleElements>&& debug_handles,
@@ -299,6 +301,26 @@ void BytecodeDeserializer::parseFunctionSchema(
   }
 }
 
+void BytecodeDeserializer::init_upgrader(mobile::Function* function) {
+  for (auto& byteCodeFunctionWithOperator : kUpgraderByteCode) {
+    // When kUpgraderByteCode is initialized in upgrader_mobile.h, the mobile
+    // function is initialized with everything (instruction, constants, types,
+    // registerer size and etc), except operator. The operator function is also
+    // static initialized and is available later. The oprator for the upgrader
+    // function will be initialized when the first module is loaded.
+    if (byteCodeFunctionWithOperator.function.get_code()->operators_.empty()) {
+      for (const auto& op : byteCodeFunctionWithOperator.operators) {
+        byteCodeFunctionWithOperator.function.append_operator(
+            op.name,
+            op.overload_name,
+            op.num_specified_args,
+            caffe2::serialize::kMaxSupportedFileFormatVersion);
+      }
+    }
+    function->append_function(byteCodeFunctionWithOperator.function);
+  }
+}
+
 void BytecodeDeserializer::parseMethods(
     c10::ivalue::TupleElements&& vals,
     c10::optional<c10::ivalue::TupleElements>&& debug_handles,
@@ -376,7 +398,7 @@ void BytecodeDeserializer::parseMethods(
       debug_handles_m_tuple =
           std::move(*std::move((*debug_handles)[i]).toTuple()).elements();
     }
-
+    init_upgrader(function.get());
     // 1. First pass all operators from models
     parseOperators(
         std::move(ops_list),
@@ -395,7 +417,9 @@ void BytecodeDeserializer::parseMethods(
         function_name,
         std::move(ins_list),
         debug_handles_m_tuple,
-        function.get());
+        function.get(),
+        use_upgrader,
+        operator_version_);
 
     parseConstants(consts_list, function.get());
 

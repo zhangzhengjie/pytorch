@@ -21,7 +21,7 @@
 #include <torch/torch.h>
 
 #include <unordered_set>
-
+#include <torch/csrc/jit/serialization/import_export_functions.h>
 // Tests go in torch::jit
 namespace torch {
 namespace jit {
